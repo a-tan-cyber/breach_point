@@ -50,9 +50,10 @@ SESSION_ACTIONS=()
 APT_UPDATED=0
 SESSION_FINALIZED=0
 SESSION_LOG="/tmp/breach_point.log"
+MASSCAN_RATE_DEFAULT=1000
 
 # Core tools leveraged across the workflow; used for startup checks and on-demand rechecks.
-CORE_TOOLS=(nmap hydra msfconsole msfvenom searchsploit zip scp base64 pscp)
+CORE_TOOLS=(nmap masscan hydra msfconsole msfvenom searchsploit zip scp base64 pscp)
 declare -A TOOL_INSTALL_DECISIONS=()
 
 banner() {
@@ -94,6 +95,7 @@ package_for_tool() {
     local tool="$1"
     case "$tool" in
         nmap) echo "nmap" ;;
+        masscan) echo "masscan" ;;
         hydra) echo "hydra" ;;
         msfconsole|msfvenom) echo "metasploit-framework" ;;
         searchsploit) echo "exploitdb" ;;
@@ -110,6 +112,7 @@ feature_for_tool() {
     local tool="$1"
     case "$tool" in
         nmap) echo "network scanning, NSE checks, weak-password discovery" ;;
+        masscan) echo "fast UDP discovery to feed targeted nmap scans" ;;
         hydra) echo "weak credential brute forcing" ;;
         msfconsole) echo "Metasploit RC execution and exploitation" ;;
         msfvenom) echo "payload generation" ;;
@@ -445,9 +448,58 @@ run_scans() {
     nmap -sS -sV -O -Pn -T4 -oN "$tcp_out" -oX "$tcp_xml" "$TARGET_NET" | tee -a "$SESSION_LOG"
     record_action "TCP scan saved to $tcp_out"
 
-    banner "UDP scan in progress"
-    nmap -sU -sV -Pn -T4 --top-ports 50 -oN "$udp_out" -oX "$udp_xml" "$TARGET_NET" | tee -a "$SESSION_LOG"
-    record_action "UDP scan saved to $udp_out"
+    # Fast UDP discovery with masscan, then targeted nmap against discovered ports
+    banner "UDP discovery with masscan (then targeted nmap -sU)"
+
+    if require_tool masscan; then
+        # Prompt for rate on first use if not already set; in non-interactive mode,
+        # fall back silently to the default to avoid blocking.
+        if [[ -z "${MASSCAN_RATE:-}" ]]; then
+            if [[ -t 0 ]]; then
+                read -rp "Masscan rate in packets/second [default: $MASSCAN_RATE_DEFAULT]: " MASSCAN_RATE
+                MASSCAN_RATE="${MASSCAN_RATE:-$MASSCAN_RATE_DEFAULT}"
+            else
+                MASSCAN_RATE="$MASSCAN_RATE_DEFAULT"
+            fi
+
+            if [[ ! "$MASSCAN_RATE" =~ ^[0-9]+$ ]]; then
+                echo "Masscan rate must be numeric; falling back to $MASSCAN_RATE_DEFAULT." | tee -a "$SESSION_LOG"
+                MASSCAN_RATE="$MASSCAN_RATE_DEFAULT"
+            fi
+        fi
+
+        local masscan_out="$RUN_DIR/scans/masscan_udp.lst"
+
+        # Note: UDP discovery with masscan is "best effort" only – due to the stateless
+        # nature of UDP and firewalls dropping packets, some open UDP services may
+        # not respond at all. We treat whatever masscan finds as a fast shortlist to
+        # feed into a more detailed nmap -sU scan.
+        masscan -pU:1-65535 "$TARGET_NET" --rate "$MASSCAN_RATE" -oL "$masscan_out" 2>&1 | tee -a "$SESSION_LOG"
+        record_action "Masscan UDP discovery saved to $masscan_out"
+
+        # Extract unique UDP ports and hosts from masscan's list (-oL format):
+        # lines look like: open udp 53 10.10.10.10
+        local udp_ports
+        udp_ports="$(awk '/^open/ && $2=="udp" {print $3}' "$masscan_out" | sort -n | uniq | paste -sd, -)"
+
+        if [[ -z "$udp_ports" ]]; then
+            echo "Masscan did not report any open UDP ports; skipping targeted nmap UDP scan." | tee -a "$SESSION_LOG"
+            record_action "No UDP ports found by masscan; skipped nmap UDP verification"
+        else
+            # Build list of unique hosts with open UDP ports
+            local udp_hosts=()
+            readarray -t udp_hosts < <(awk '/^open/ && $2=="udp" {print $4}' "$masscan_out" | sort -u)
+
+            banner "UDP verification scan with nmap on ports: $udp_ports"
+            nmap -sU -sV -Pn -T4 -p "$udp_ports" -oN "$udp_out" -oX "$udp_xml" "${udp_hosts[@]}" | tee -a "$SESSION_LOG"
+            record_action "Targeted UDP nmap scan saved to $udp_out (ports: $udp_ports)"
+        fi
+    else
+        # Fallback to original nmap-only UDP scan if masscan is unavailable
+        banner "UDP scan in progress (nmap fallback; masscan unavailable)"
+        nmap -sU -sV -Pn -T4 --top-ports 50 -oN "$udp_out" -oX "$udp_xml" "$TARGET_NET" | tee -a "$SESSION_LOG"
+        record_action "UDP scan saved to $udp_out (masscan unavailable)"
+    fi
 
     if [[ "$SCAN_TYPE" == "full" ]]; then
         banner "Stage 2b - Full Scan: NSE + Vulnerability Check"
