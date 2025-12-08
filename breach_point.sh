@@ -40,6 +40,13 @@
 set -o nounset
 set -o pipefail
 
+# Require root / sudo
+if [[ "$EUID" -ne 0 ]]; then
+    echo "[!] This script must be run as root (sudo)."
+	echo "    Example: sudo $(basename "$0")"
+    exit 1
+fi
+
 ########################
 # 0. Helper functions  #
 ########################
@@ -138,14 +145,6 @@ install_tool() {
     fi
 
     local apt_cmd="apt-get"
-    if [[ "$EUID" -ne 0 ]]; then
-        if command -v sudo >/dev/null 2>&1; then
-            apt_cmd="sudo apt-get"
-        else
-            log_msg "[!] Insufficient privileges to install $tool (no sudo)."
-            return 1
-        fi
-    fi
 
     if [[ -z "$package" ]]; then
         log_msg "[!] No installation mapping for $tool. Please install it manually."
@@ -368,13 +367,6 @@ dependency_summary_report() {
 ############################
 
 banner "Stage 1 - Getting User Input"
-
-# Inform the user that some scan options may require elevated privileges
-if [[ $EUID -ne 0 ]]; then
-    echo "[!] Note: You are not running as root. Some scan options"
-    echo "    (e.g. -sS, -O, certain NSE scripts) may be limited or fail."
-    echo "    For full functionality, consider running this script with sudo."
-fi
 
 while :; do
     read -rp "Enter target network (e.g. 192.168.1.0/24): " TARGET_NET
