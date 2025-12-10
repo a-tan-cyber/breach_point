@@ -10,7 +10,7 @@
 # Show a help/overview message and exit when called with -h or --help.
 print_usage() {
     cat <<EOF
-Usage: sudo $(basename "$0")
+Usage: sudo bash $(basename "$0")
 
 =========================================================
 Project Breach Point - Automation Script
